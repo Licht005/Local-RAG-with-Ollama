@@ -1,0 +1,7 @@
+# Ignore Vector DBs
+chroma_db/
+chroma_db_app/
+__pycache__/
+
+# Ignore Environment Variables (Security)
+.env
