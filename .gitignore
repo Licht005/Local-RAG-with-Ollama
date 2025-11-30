@@ -2,6 +2,7 @@
 chroma_db/
 chroma_db_app/
 __pycache__/
+*.pdf
 
 # Ignore Environment Variables (Security)
 .env

@@ -31,7 +31,7 @@ def reset_db():
 
 with st.sidebar:
     file = st.file_uploader("Upload PDF", type="pdf")
-    model = st.selectbox("Model", ["llama3.2", "mistral", "gemma2"])
+    model = st.selectbox("Model", ["llama3.2", "mistral", "gemma"])
     if st.button("Process") and file:
         reset_db()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
