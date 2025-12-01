@@ -1,93 +1,104 @@
 import streamlit as st
-import tempfile
-import time
 import os
 import shutil
-from langchain_community.document_loaders import PyMuPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_ollama import OllamaLLM
-from langchain_core.prompts import ChatPromptTemplate
+from pathlib import Path
+import tempfile
+from rag_system import LocalRAGSystem
 
-st.set_page_config(page_title="Local RAG", layout="wide")
-DB = "./chroma_db_app"
-st.title("Local PDF RAG")
+st.set_page_config(page_title="Local RAG Chat", page_icon="📚", layout="wide")
 
-def reset_db():
+@st.cache_resource
+def load_rag_system():
+    return LocalRAGSystem()
+
+def clear_vectorstore():
+    if os.path.exists("./chroma_db"):
+        shutil.rmtree("./chroma_db")
+        st.success("Vectorstore cleared successfully!")
+
+def main():
+    st.title("Local RAG")
+    
+    rag_system = load_rag_system()
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("Document Management")
+        
+        uploaded_files = st.file_uploader(
+            "Upload PDF or DOCX files",
+            type=['pdf', 'docx'],
+            accept_multiple_files=True,
+            help="Upload documents to create a knowledge base for chatting"
+        )
+        
+        if st.button("Clear Knowledge Base", type="primary"):
+            if st.button("Confirm Clear Knowledge Base", type="primary"):
+                clear_vectorstore()
+                st.session_state.clear()
+                st.rerun()
+    
+    # Main interface
+    col1, col2 = st.columns([3, 1])
+    
+    with col2:
+        document_count = rag_system.get_document_count()
+        st.metric("Documents in Knowledge Base", document_count)
+    
+    # File processing
+    if uploaded_files:
+        with st.spinner("Processing uploaded documents..."):
+            # Create a temporary directory for uploaded files
+            with tempfile.TemporaryDirectory() as temp_dir:
+                file_paths = []
+                for uploaded_file in uploaded_files:
+                    file_path = Path(temp_dir) / uploaded_file.name
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    file_paths.append(str(file_path))
+                
+                # Load and process documents
+                documents = rag_system.load_documents(file_paths)
+                rag_system.create_vectorstore(documents)
+                rag_system.setup_rag_chain()
+                
+                st.success(f"Successfully processed {len(uploaded_files)} document(s). "
+                         f"Knowledge base contains {rag_system.get_document_count()} chunks.")
+    
+    # Check if vectorstore exists and is ready for querying
     try:
-        if "vs" in st.session_state:
-            st.session_state.vs = None
-    except:
-        pass
-
-    for _ in range(10):
-        try:
-            if os.path.exists(DB):
-                shutil.rmtree(DB)
-            return
-        except PermissionError:
-            time.sleep(0.15)
-
-with st.sidebar:
-    file = st.file_uploader("Upload PDF", type="pdf")
-    model = st.selectbox("Model", ["llama3.2", "mistral", "gemma"])
-    if st.button("Process") and file:
-        reset_db()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(file.getvalue())
-            path = tmp.name
-
-        loader = PyMuPDFLoader(path)
-        pages = loader.load()
-        text = "".join([p.page_content for p in pages]).strip()
-        if not text:
-            st.error("PDF has no extractable text.")
-            st.stop()
-
-        splitter = RecursiveCharacterTextSplitter(chunk_size=650, chunk_overlap=80)
-        chunks = splitter.split_documents(pages)
-
-        emb = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        st.session_state.vs = Chroma.from_documents(chunks, emb, persist_directory=DB)
-        st.success("Ready.")
-
-if "msgs" not in st.session_state:
-    st.session_state.msgs = []
-
-for m in st.session_state.msgs:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
-
-q = st.chat_input("Ask about the PDF...")
-if q:
-    st.session_state.msgs.append({"role": "user", "content": q})
-    with st.chat_message("user"):
-        st.markdown(q)
-
-    if "vs" not in st.session_state:
-        with st.chat_message("assistant"):
-            st.markdown("Upload a PDF first.")
-    else:
-        retriever = st.session_state.vs.as_retriever(search_kwargs={"k": 4})
-        docs = retriever.invoke(q)
-        if not docs:
-            ans = "No answer found in the PDF."
+        if rag_system.get_document_count() > 0:
+            st.success("Knowledge base is ready. You can now ask questions about the uploaded documents.")
+            
+            # Chat interface
+            if "messages" not in st.session_state:
+                st.session_state.messages = []
+            
+            # Display chat messages
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+            
+            # Chat input
+            if prompt := st.chat_input("Ask a question about the uploaded documents:"):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        response = rag_system.query(prompt)
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    
         else:
-            context = "\n\n".join([d.page_content for d in docs])
-            llm = OllamaLLM(model=model)
-
-            prompt = ChatPromptTemplate.from_template(
-                "Use only the context.\n\n{context}\n\nQuestion: {question}\nAnswer:"
+            st.info(
+                "Please upload PDF or DOCX documents to create a knowledge base. "
+                "Once documents are uploaded, you can ask questions about their content."
             )
+            
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
 
-            chain = prompt | llm
-            out = ""
-            box = st.chat_message("assistant")
-            slot = box.empty()
-
-            for chunk in chain.stream({"context": context, "question": q}):
-                out += chunk
-                slot.markdown(out)
-
-            st.session_state.msgs.append({"role": "assistant", "content": out})
+if __name__ == "__main__":
+    main()
